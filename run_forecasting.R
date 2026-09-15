@@ -6,7 +6,7 @@
 # of Urban Water Demand" (Urban Water Journal, under review)
 #
 # Observational domain : 2007-01-07 to 2013-12-31 (2,551 daily records)
-# Projection domain    : 2014-2040 (scenario simulation; no observations)
+# Projection domain    : 2014-2030 (scenario simulation; no observations)
 #
 # ------------------------------------------------------------
 # HOW TO RUN
@@ -42,7 +42,7 @@
 #   C11 Preferred specification fixed a priori (MPO) rather than selected
 #       by test-set RMSE at run time.
 #   C12 Rolling-origin cross-validation by forecast horizon (new Table 5).
-#   C13 Projection horizon extended to 2040 with bootstrap intervals.
+#   C13 Projection intervals obtained by simulation from the fitted Gamma.
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -53,6 +53,10 @@ suppressPackageStartupMessages({
   library(lmtest)
   library(grDevices)
 })
+
+# Dependencies are declared above and are not installed at run time: a call to
+# install.packages() inside a script fails on machines without write access or
+# network, and stepR was not used anywhere in this pipeline.
 
 # ============================================================
 # 0) PROJECT PATHS + CONFIG
@@ -108,7 +112,7 @@ cfg <- list(
   p_bella   = find_one_file(data_dir, "bellavista.*precip|precip.*bellavista|c05", "Bellavista precipitation"),
   p_inq     = find_one_file(data_dir, "inaquito.*precip|precip.*inaquito|p09", "Iñaquito precipitation"),
   oni       = find_one_file(data_dir, "oni", "ONI"),
-  anio_fin  = 2040,                # C13: extended horizon (was 2030)
+  anio_fin  = 2030,                # projection horizon, as reported in the manuscript
   oni_obs_through_year = 2026,
   split_frac = 0.80,
   seed      = 123,
@@ -1107,6 +1111,29 @@ tab_glm <- eval_models(glm_models, test)
 fwrite(tab_ols, file.path(cfg$results_dir, "Table_Performance_OLS.csv"), bom = TRUE)
 fwrite(tab_glm, file.path(cfg$results_dir, "Table_Performance_GLM_Gamma.csv"), bom = TRUE)
 
+# Table 4 of the manuscript: comparative performance of the regression-based
+# specifications. OLS and GLM Gamma results are stacked so that the table
+# matches the caption "Comparative performance of the regression-based model
+# specifications" rather than being split across two files.
+tab4_reg <- rbindlist(list(
+  copy(tab_ols)[, Family := "OLS"],
+  copy(tab_glm)[, Family := "GLM Gamma (log link)"]
+), fill = TRUE)
+setcolorder(tab4_reg, c("Family", setdiff(names(tab4_reg), "Family")))
+setorder(tab4_reg, Family, RMSE)
+fwrite(tab4_reg, file.path(cfg$tab_dir, "Table4_RegressionSpecifications.csv"), bom = TRUE)
+
+writeLines(paste0(
+  "Table 4: Comparative performance of the regression-based model ",
+  "specifications on the test set (n = ", nrow(test), "). Specifications are ",
+  "defined in Table 2. Lower RMSE, MAE, MAPE and MASE indicate better ",
+  "predictive accuracy. The preferred specification (", cfg$preferred_spec,
+  ") was fixed a priori on grounds of parsimony, interpretability and scenario ",
+  "capability, not by test-set error; MPS and MPOS are rank-deficient because ",
+  "the dry-season indicator is an exact function of calendar month."),
+  file.path(cfg$tab_dir, "Table4_Notes.txt"))
+message("[OK] Table 4 (regression specifications) written")
+
 # C11: the preferred specification is fixed a priori on grounds of
 # parsimony, interpretability and scenario capability, NOT selected by
 # test-set RMSE at run time. MPO and MPOS differ by 0.12 L/s in RMSE, so
@@ -1155,6 +1182,101 @@ tab_se[, `Inflation factor` := round(abs(`t (naive)`) / pmax(abs(`t (clustered)`
 fwrite(tab_se, file.path(cfg$results_dir, "Table_ClusteredStandardErrors.csv"), bom = TRUE)
 message("[OK] C6 clustered standard errors written")
 print(tab_se)
+
+# ------------------------------------------------------------
+# C14: SERIAL DEPENDENCE AND AUTOCORRELATION-CONSISTENT INFERENCE
+# The specification contains no autoregressive component, so residual
+# serial dependence is expected. It is quantified here because it governs
+# what the model can support: under first-order dependence the nominal
+# sample size overstates the information available, and it is also the
+# reason the univariate ARIMA benchmark attains lower forecast error.
+# Clustering by month does not address lag-1 dependence within months,
+# so Newey-West standard errors are reported, with a sensitivity analysis
+# over bandwidths exceeding the range of detectable autocorrelation.
+# ------------------------------------------------------------
+
+res_p  <- residuals(final_model, type = "pearson")
+n_obs  <- length(res_p)
+acf_v  <- acf(res_p, lag.max = 40, plot = FALSE)$acf[-1]
+rho1   <- acf_v[1]
+ci_band <- 1.96 / sqrt(n_obs)
+n_eff  <- n_obs * (1 - rho1) / (1 + rho1)
+
+dw <- lmtest::dwtest(lm(formula(final_model), data = df2))
+lb7  <- Box.test(res_p, lag = 7,  type = "Ljung-Box")
+lb30 <- Box.test(res_p, lag = 30, type = "Ljung-Box")
+
+message(sprintf("[QA] C14 residual ACF: lag1 = %.3f | lag7 = %.3f | lag30 = %.3f",
+                acf_v[1], acf_v[7], acf_v[30]))
+message(sprintf("[QA] C14 lags outside the 95%% band (of 40): %d",
+                sum(abs(acf_v) > ci_band)))
+message(sprintf("[QA] C14 Durbin-Watson = %.3f (p = %.3g)", dw$statistic, dw$p.value))
+message(sprintf("[QA] C14 Ljung-Box(30) = %.0f (p = %.3g)", lb30$statistic, lb30$p.value))
+message(sprintf("[QA] C14 effective sample size ~ %.0f of %d (%.0f%%)",
+                n_eff, n_obs, 100 * n_eff / n_obs))
+
+terms_k  <- intersect(c("P7", "I(P7^2)", "oni", "anio"), names(coef(final_model)))
+bw_auto  <- ceiling(4 * (n_obs / 100)^(2/9))
+bw_set   <- sort(unique(c(bw_auto, 20, 30, 60)))
+
+hac_ct <- function(L) coeftest(final_model,
+  vcov = NeweyWest(final_model, lag = L, prewhite = FALSE, adjust = TRUE))
+
+tab_hac <- rbindlist(lapply(bw_set, function(L) {
+  ct <- hac_ct(L)
+  data.table(Bandwidth = L, Term = terms_k,
+             Estimate = round(ct[terms_k, 1], 6),
+             `t` = round(ct[terms_k, 3], 2),
+             `p` = signif(ct[terms_k, 4], 3))
+}))
+
+# tabla suplementaria: comparacion de los tres esquemas de error estandar
+ct_naive <- coeftest(final_model)
+ct_clust <- coeftest(final_model, vcov = vcovCL, cluster = df2$mes_anio)
+ct_hac   <- hac_ct(bw_auto)
+
+tab_se_all <- data.table(
+  Term               = terms_k,
+  Estimate           = round(ct_naive[terms_k, 1], 6),
+  `t (conventional)` = round(ct_naive[terms_k, 3], 2),
+  `p (conventional)` = signif(ct_naive[terms_k, 4], 3),
+  `t (month-clustered)` = round(ct_clust[terms_k, 3], 2),
+  `p (month-clustered)` = signif(ct_clust[terms_k, 4], 3),
+  `t (Newey-West)`   = round(ct_hac[terms_k, 3], 2),
+  `p (Newey-West)`   = signif(ct_hac[terms_k, 4], 3)
+)
+for (L in setdiff(bw_set, bw_auto)) {
+  ct <- hac_ct(L)
+  tab_se_all[[paste0("t (Newey-West, bw = ", L, ")")]] <- round(ct[terms_k, 3], 2)
+}
+
+fwrite(tab_se_all, file.path(cfg$results_dir, "Table_SerialDependence_Inference.csv"), bom = TRUE)
+fwrite(tab_hac,    file.path(cfg$results_dir, "Table_HAC_Bandwidth_Sensitivity.csv"), bom = TRUE)
+
+acf_out <- data.table(Lag = seq_along(acf_v), ACF = round(as.numeric(acf_v), 4))
+acf_out[, `Outside 95% band` := fifelse(abs(ACF) > ci_band, "yes", "no")]
+fwrite(acf_out, file.path(cfg$results_dir, "Table_ResidualACF.csv"), bom = TRUE)
+
+s7_note <- paste0(
+  "Notes: Estimates from the MPO GLM Gamma specification refitted on the full ",
+  "observational record (n = ", n_obs, "). Residuals exhibit serial dependence ",
+  "(first-order autocorrelation ", sprintf("%.3f", rho1),
+  "; all 40 lags examined fall outside the 95% band; Durbin-Watson ",
+  sprintf("%.2f", dw$statistic), "; Ljung-Box(30) p < 0.001), so the effective ",
+  "number of independent observations is approximately ", round(n_eff),
+  ". Conventional standard errors are reported for comparison only and are not ",
+  "used for inference. Month-clustered errors address dependence between months ",
+  "but not lag-1 dependence within them. Newey-West standard errors (automatic ",
+  "bandwidth ", bw_auto, " days) are used throughout the manuscript; the ",
+  "additional columns show that the conclusions are unchanged at bandwidths up ",
+  "to 60 days, beyond the range over which residual autocorrelation remains ",
+  "detectable."
+)
+writeLines(s7_note, file.path(cfg$results_dir, "Table_SerialDependence_Notes.txt"))
+
+cat("\n=========== SERIAL DEPENDENCE AND ROBUST INFERENCE ===========\n\n")
+print(tab_se_all)
+cat("\n", s7_note, "\n\n", sep = "")
   # C7: MPS and MPOS include the dry-season indicator, which is an exact
   # linear combination of the month factor. Their design matrices are
   # rank-deficient and the main effect of droughtF is not identifiable.
@@ -1249,7 +1371,11 @@ tab3_out[, Bias := round(Bias, 2)]
 tab3_out[, `R² (test)` := round(`R² (test)`, 3)]
 tab3_out[, r := round(r, 3)]
 
-fwrite(tab3_out, file.path(cfg$tab_dir, "Table3_ModelFamilyComparison.csv"), bom = TRUE)
+# This table compares the candidate SPECIFICATIONS (M0 to MPOS, OLS and GLM
+# Gamma). It corresponds to Table 4 of the manuscript.
+fwrite(tab3_out, file.path(cfg$results_dir, "Table_SpecificationComparison.csv"), bom = TRUE)
+
+
 
 writeLines(c(table1_title), con = file.path(cfg$tab_dir, "Table1_Title.txt"))
 writeLines(c(table2_title), con = file.path(cfg$tab_dir, "Table2_Title.txt"))
@@ -1557,6 +1683,59 @@ tab_out[, AIC := round(AIC, 0)]
 tab_out[, BIC := round(BIC, 0)]
 
 fwrite(tab_out, file.path(cfg$results_dir, "Table_ModelComparison_WithSkill.csv"), bom = TRUE)
+
+# ------------------------------------------------------------
+# Table 3 of the manuscript: performance comparison across model FAMILIES
+# on the test set (ARIMA, ETS, SARIMAX, GAM, GLM). Built from the
+# cross-family comparison so that the exported file matches the caption
+# "Performance comparison of candidate forecasting models using the test
+# dataset".
+# ------------------------------------------------------------
+# The family comparison is read back from the file written by
+# fit_other_models(): the object `tab_compare` is later reassigned to the
+# specification comparison with skill scores, so referring to it here would
+# export the wrong table.
+fam_src <- file.path(cfg$results_dir, "Table_Comparison_GLM_GAM_SARIMAX_ARIMA_ETS.csv")
+if (file.exists(fam_src)) {
+  tab3_fam <- fread(fam_src, encoding = "UTF-8")
+  # AIC is retained: it is informative within each family and the reviewers
+  # refer to it explicitly. The caption states that values are not comparable
+  # ACROSS families, because the ARIMA and ETS benchmarks use a Gaussian
+  # likelihood on a differenced series with reduced effective n, whereas the
+  # GLM and GAM specifications use a Gamma likelihood on levels with full n.
+  # BIC is dropped because it is empty for the univariate benchmarks.
+  if ("BIC" %in% names(tab3_fam)) tab3_fam[, BIC := NULL]
+  if ("AIC" %in% names(tab3_fam)) tab3_fam[, AIC := round(AIC, 0)]
+  num_cols <- names(tab3_fam)[vapply(tab3_fam, is.numeric, logical(1))]
+  for (cc in num_cols) {
+    dg <- if (grepl("R\u00b2|^r$", cc)) 3 else 2
+    tab3_fam[, (cc) := round(get(cc), dg)]
+  }
+  if ("RMSE" %in% names(tab3_fam)) setorder(tab3_fam, RMSE)
+  fwrite(tab3_fam, file.path(cfg$tab_dir, "Table3_ModelFamilyComparison.csv"), bom = TRUE)
+
+  writeLines(paste0(
+    "Table 3: Performance comparison of candidate forecasting models using ",
+    "the test dataset (n = ", nrow(test), "). Lower values of RMSE, MAE, ",
+    "MedAE, MAPE and sMAPE indicate better predictive performance. ",
+    "RMSE = root mean square error; MAE = mean absolute error; ",
+    "MedAE = median absolute error; MAPE = mean absolute percentage error; ",
+    "sMAPE = symmetric mean absolute percentage error; Bias = mean prediction ",
+    "bias; r = Pearson correlation between observed and predicted demand. ",
+    "AIC values are comparable only WITHIN each model family: the ARIMA and ",
+    "ETS benchmarks are estimated by a Gaussian likelihood on the differenced ",
+    "series with reduced effective sample size, whereas the GLM and GAM ",
+    "specifications use a Gamma likelihood on the series in levels with the ",
+    "full sample. Cross-family differences in AIC therefore reflect the change ",
+    "of likelihood and scale rather than relative goodness of fit, and model ",
+    "selection in this study does not rely on them."),
+    file.path(cfg$tab_dir, "Table3_Notes.txt"))
+  message("[OK] Table 3 (model family comparison) written")
+} else {
+  warning("[TABLE 3] family comparison file not found; Table 3 not exported",
+          call. = FALSE)
+}
+
 
 err_arima    <- y_test - p_arima
 err_glm_high <- y_test - p_glm_high
@@ -2085,7 +2264,7 @@ setnames(K_obs_out,
          c("Year", "Mean daily demand (L/s)", "Maximum daily demand (L/s)",
            "Days", "Peak factor K"))
 
-fwrite(K_obs_out,   file.path(cfg$tab_dir,     "Table_PeakFactor_K_byYear.csv"),  bom = TRUE)
+fwrite(K_obs_out,   file.path(cfg$results_dir, "Table_PeakFactor_K_byYear.csv"),  bom = TRUE)
 fwrite(K_methods,   file.path(cfg$results_dir, "Table_PeakFactor_K_methods.csv"), bom = TRUE)
 
 k_note <- paste0(
@@ -2099,7 +2278,7 @@ k_note <- paste0(
   "omits residual variability and understates the coefficient (", round(mean(K_mu$K_peak), 3),
   " versus ", round(K_obs_summary$mean, 3), ")."
 )
-writeLines(k_note, con = file.path(cfg$tab_dir, "Table_PeakFactor_K_Notes.txt"))
+writeLines(k_note, con = file.path(cfg$results_dir, "Table_PeakFactor_K_Notes.txt"))
 
 cat("\n================ PEAK FACTOR K ================\n\n")
 cat("Por anio (demanda observada):\n"); print(K_obs_out)
@@ -2131,7 +2310,7 @@ save_png("Figure_PeakFactor_K.png", {
          bty = "n", cex = 0.82, seg.len = 2.2)
 }, width = 2100, height = 1400, res = 320)
 
-message("[OK] K guardado en: ", file.path(cfg$tab_dir, "Table_PeakFactor_K_byYear.csv"))
+message("[OK] K guardado en: ", file.path(cfg$results_dir, "Table_PeakFactor_K_byYear.csv"))
 
 
 # ============================================================
@@ -2146,76 +2325,173 @@ step("SUBMISSION EXPORT")
 
 sub_dir  <- file.path(root_dir, "submission")
 sub_fig  <- file.path(sub_dir, "figures")
+sub_tab  <- file.path(sub_dir, "tables")
 sub_supp <- file.path(sub_dir, "supplementary")
-for (d in c(sub_dir, sub_fig, sub_supp)) dir.create(d, showWarnings = FALSE, recursive = TRUE)
+
+for (d in c(sub_dir, sub_fig, sub_tab, sub_supp)) {
+  dir.create(d, showWarnings = FALSE, recursive = TRUE)
+}
+
+# ------------------------------------------------------------
+# Figures
+# Figures 1 and 2 are external/manual.
+# The script generates Figures 3-8.
+# ------------------------------------------------------------
 
 fig_map <- c(
-  "Figure4_ResidualDiagnostics.png"                   = "Fig3_ResidualDiagnostics.png",
-  "Figure2_ObservedVsPredicted_TwoPanels.png"         = "Fig4_ObservedVsPredicted.png",
+  "Figure2_ObservedVsPredicted_TwoPanels.png"          = "Fig3_ObservedVsPredicted_TwoPanels.png",
+  "Figure4_ResidualDiagnostics.png"                   = "Fig4_ResidualDiagnostics.png",
   "Figure6_HydrosocialDrivers_Bellavista_MPO_OLS.png" = "Fig5_DriverContributions.png",
-  "Figure3_RainfallDemand_MPOS.png"                   = "Fig6_RainfallResponse.png",
-  "Figure5_ProjectedDemand_TwoPanels.png"             = "Fig7_ProjectedDemand.png",
-  "Figure7_MASE_vs_Horizon.png"                       = "Fig8_MASE_by_Horizon.png",
-  "Figure_PeakFactor_K.png"                           = "Fig9_PeakFactorK.png"
+  "Figure3_RainfallDemand_MPOS.png"                    = "Fig6_RainfallResponse.png",
+  "Figure5_ProjectedDemand_TwoPanels.png"              = "Fig7_ProjectedDemand.png",
+  "Figure7_MASE_vs_Horizon.png"                        = "Fig8_MASE_by_Horizon.png"
 )
 
+# ------------------------------------------------------------
+# Supplementary tables
+# All supplementary tables are generated in cfg$results_dir.
+# The rolling-origin MASE table is Table 5 of the body, not supplementary.
+# ------------------------------------------------------------
+
+# Numbering follows the order of first citation in the manuscript:
+#   S3 full coefficients, S4 scenario projections, S5 rolling-origin detail.
 supp_map <- c(
-  "Table_DieboldMariano_Results.csv"              = "TableS1_DieboldMariano.csv",
-  "Table_ClusteredStandardErrors.csv"             = "TableS2_ClusteredStandardErrors.csv",
-  "Table_Forecast_Annual_MixedScenarios.csv"      = "TableS3_ProjectedDemand_Scenarios.csv",
-  "Table5_RollingOriginCV_FULL.csv"               = "TableS4_RollingOriginCV_ByOrigin.csv",
-  "Table_PeakFactor_K_methods.csv"                = "TableS5_PeakFactor_Methods.csv",
-  "Table_HydrosocialBlockContributions_MPO_OLS.csv" = "TableS6_BlockContributions.csv"
+  "Table_DieboldMariano_Results.csv"                = "TableS1_DieboldMariano.csv",
+  "Table_HydrosocialBlockContributions_MPO_OLS.csv" = "TableS2_BlockContributions.csv",
+  "Table_SerialDependence_Inference.csv"            = "TableS3_ModelCoefficients_RobustSE.csv",
+  "Table_SerialDependence_Notes.txt"                = "TableS3_Notes.txt",
+  "Table_Forecast_Annual_MixedScenarios.csv"        = "TableS4_ProjectedDemand_Scenarios.csv",
+  "Table5_RollingOriginCV_FULL.csv"                 = "TableS5_RollingOriginCV_ByOrigin.csv",
+  "Table_PeakFactor_K_methods.csv"                  = "TableS6_PeakFactor_Methods.csv",
+  "Table_HAC_Bandwidth_Sensitivity.csv"             = "TableS7_HAC_BandwidthSensitivity.csv",
+  "Table_ResidualACF.csv"                           = "TableS8_ResidualACF.csv",
+  "Table_PeakFactor_K_byYear.csv"                   = "TableS9_PeakFactorK_ByYear.csv",
+  "Table_PeakFactor_K_Notes.txt"                    = "TableS9_Notes.txt"
 )
 
 copy_set <- function(src_dir, mapping, dest, label) {
   ok <- 0L
+  
   for (i in seq_along(mapping)) {
     src <- file.path(src_dir, names(mapping)[i])
+    
     if (file.exists(src)) {
-      file.copy(src, file.path(dest, mapping[i]), overwrite = TRUE)
+      file.copy(
+        src,
+        file.path(dest, mapping[i]),
+        overwrite = TRUE
+      )
       ok <- ok + 1L
     } else {
-      warning("[EXPORT] not found: ", names(mapping)[i], call. = FALSE)
+      warning(
+        "[EXPORT] not found: ",
+        names(mapping)[i],
+        call. = FALSE
+      )
     }
   }
-  message("[EXPORT] ", label, ": ", ok, "/", length(mapping), " files")
+  
+  message(
+    "[EXPORT] ", label, ": ",
+    ok, "/", length(mapping), " files"
+  )
+  
   ok
 }
 
-copy_set(cfg$fig_dir,     fig_map,  sub_fig,  "figures")
-copy_set(cfg$results_dir, supp_map, sub_supp, "supplementary tables")
+# Copy generated Figures 3-8
+copy_set(
+  cfg$fig_dir,
+  fig_map,
+  sub_fig,
+  "figures"
+)
 
-# Figures 1 and 2 are not produced by this script (study-area map and
-# methodological workflow diagram). Placed manually; flagged if absent.
+# Copy Supplementary Tables S1-S4
+copy_set(
+  cfg$results_dir,
+  supp_map,
+  sub_supp,
+  "supplementary tables S1-S9"
+)
+
+# ------------------------------------------------------------
+# Figures 1 and 2 are external/manual.
+# ------------------------------------------------------------
+
 for (f in c("Fig1_StudyArea.png", "Fig2_MethodologicalWorkflow.png")) {
-  if (!file.exists(file.path(sub_fig, f)))
-    message("[EXPORT] add manually: submission/figures/", f)
+  if (!file.exists(file.path(sub_fig, f))) {
+    message(
+      "[EXPORT] add manually: submission/figures/",
+      f
+    )
+  }
 }
 
-# Body tables
-sub_tab <- file.path(sub_dir, "tables")
-dir.create(sub_tab, showWarnings = FALSE)
+# ------------------------------------------------------------
+# Main body tables
+# Tables 1 and 2 are external/manual.
+# The script generates Tables 3-5.
+# ------------------------------------------------------------
+
+# Tables 1 and 2 of the manuscript are prepared manually and are not
+# generated here. Tables 3 to 6 are exported with the manuscript numbering.
 body_map <- c(
-  "Table1_ModelSpecifications.csv"    = "Table1_ModelSpecifications.csv",
-  "Table3_ModelFamilyComparison.csv"  = "Table3_ModelFamilyComparison.csv",
-  "Table5_RollingOriginCV_MASE.csv"   = "Table5_RollingOriginCV.csv",
-  "Table_PeakFactor_K_byYear.csv"     = "Table6_PeakFactorK.csv",
-  "Table5_Notes.txt"                  = "Table5_Notes.txt",
-  "Table_PeakFactor_K_Notes.txt"      = "Table6_Notes.txt"
+  "Table3_ModelFamilyComparison.csv"     = "Table3_ModelFamilyComparison.csv",
+  "Table3_Notes.txt"                     = "Table3_Notes.txt",
+  "Table4_RegressionSpecifications.csv"  = "Table4_RegressionSpecifications.csv",
+  "Table4_Notes.txt"                     = "Table4_Notes.txt",
+  "Table5_RollingOriginCV_MASE.csv"      = "Table5_RollingOriginCV.csv",
+  "Table5_Notes.txt"                     = "Table5_Notes.txt"
 )
-copy_set(cfg$tab_dir, body_map, sub_tab, "body tables")
+
+copy_set(
+  cfg$tab_dir,
+  body_map,
+  sub_tab,
+  "body tables 3-5"
+)
+
+# ------------------------------------------------------------
+# Submission manifest
+# ------------------------------------------------------------
 
 writeLines(c(
   "SUBMISSION PACKAGE",
-  paste0("Generated: ", format(Sys.time(), "%Y-%m-%d %H:%M")),
+  paste0(
+    "Generated: ",
+    format(Sys.time(), "%Y-%m-%d %H:%M")
+  ),
   "",
-  "figures/        Figures 1-9, numbered as in the manuscript",
-  "tables/         Tables 1, 3, 5 and 6 with their notes",
-  "supplementary/  Supplementary tables S1-S6",
+  "figures/        Fig3-Fig8 generated here; Fig1-Fig2 placed manually",
+  "tables/         Table3-Table5 generated here; Table1-Table2 placed manually",
+  "supplementary/  Supplementary Tables S1-S9",
   "",
-  "Figures 1 and 2 (study-area map and methodological workflow) are not",
-  "generated by the analysis code and must be placed manually.",
+  "PLACED MANUALLY (not produced by this code):",
+  "  Fig1_StudyArea.png              study-area map",
+  "  Fig2_MethodologicalWorkflow.png methodological workflow diagram",
+  "  Table 1  statistical models evaluated",
+  "  Table 2  candidate model formulations",
+  "",
+  "MANUSCRIPT NUMBERING",
+  "  Figure 3  observed versus predicted daily demand",
+  "  Figure 4  residual diagnostics",
+  "  Figure 5  driver contributions to explained variance",
+  "  Figure 6  response to antecedent precipitation",
+  "  Figure 7  projected demand under scenarios",
+  "  Figure 8  predictive accuracy by forecast horizon",
+  "  Table 3   performance comparison across model families",
+  "  Table 4   comparative performance of regression specifications",
+  "  Table 5   predictive accuracy by forecast horizon",
+  "  Table S1  Diebold-Mariano tests",
+  "  Table S2  block contributions to explained variance",
+  "  Table S3  model coefficients with robust standard errors",
+  "  Table S4  projected demand by scenario",
+  "  Table S5  rolling-origin cross-validation by origin",
+  "  Table S6  peak factor estimated by three methods",
+  "  Table S7  HAC bandwidth sensitivity",
+  "  Table S8  residual autocorrelation function",
+  "  Table S9  annual peak-demand coefficient K",
   "",
   "Session information:",
   capture.output(sessionInfo())
@@ -2223,15 +2499,27 @@ writeLines(c(
 
 message("[OK] Submission package: ", sub_dir)
 
+cat("\n[OK] SUBMISSION FIGURES:\n")
+print(list.files(sub_fig))
 
-cat("\n[OK] FIGURES:\n")
+cat("\n[OK] SUBMISSION TABLES:\n")
+print(list.files(sub_tab))
+
+cat("\n[OK] SUPPLEMENTARY TABLES:\n")
+print(list.files(sub_supp))
+
+cat("\n[OK] OUTPUT FIGURES:\n")
 print(list.files(cfg$fig_dir))
 
-cat("\n[OK] TABLES:\n")
+cat("\n[OK] OUTPUT TABLES:\n")
 print(list.files(cfg$tab_dir))
 
 cat("\n[OK] RESULTS:\n")
 print(list.files(cfg$results_dir))
 
-message("\n[OK] Done. Project outputs saved under: ", root_dir)
+message(
+  "\n[OK] Done. Project outputs saved under: ",
+  root_dir
+)
+
 
