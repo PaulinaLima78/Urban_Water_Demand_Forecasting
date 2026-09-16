@@ -26,8 +26,8 @@
 #       projection (previously fitted on the 80% training split only).
 #   C2  Peak factor K estimated from observed and simulated demand rather
 #       than from modelled conditional means, which omit residual variance.
-#   C3  Plant-shutdown outliers below the lower boxplot fence excluded and
-#       reported, as stated in the Methods.
+#   C3  Plant-shutdown outliers below the lower boxplot fence identified and
+#       reported; retained in the analytical dataset by default.
 #   C4  Antecedent precipitation resampled by calendar month in projections
 #       (previously held constant across the whole horizon).
 #   C5  Real Ecuadorian public-holiday calendar in projections
@@ -117,7 +117,7 @@ cfg <- list(
   split_frac = 0.80,
   seed      = 123,
   preferred_spec = "MPO",          # C11: fixed a priori, not chosen by test RMSE
-  drop_outliers  = TRUE,           # C3
+  drop_outliers  = FALSE,          # C3: identify and report, do not exclude
   n_boot         = 1000,           # C13: projection intervals
   n_sim_K        = 2000,           # C2
   cv_first_origin = 1200,          # C12
@@ -506,16 +506,20 @@ build_features <- function(dem, p_bella, p_inq, oni_monthly) {
   df2 <- df[!is.na(P7)]
   setorder(df2, fecha)
 
-  # C3: the Methods state that outliers were screened with boxplot.stats.
-  # Observations below the lower fence correspond to plant shutdowns rather
-  # than to demand and are removed here, explicitly and reproducibly.
+  # C3: outliers are IDENTIFIED and reported but RETAINED in the analytical
+  # dataset, so that the full operational record is modelled. Set
+  # cfg$drop_outliers to TRUE to exclude them instead.
   lo_fence <- quantile(df2$caudal, .25, na.rm = TRUE) - 1.5 * IQR(df2$caudal, na.rm = TRUE)
   out_rows <- df2[caudal < lo_fence, .(fecha, caudal)]
   if (nrow(out_rows) > 0) {
     message("[QA] Lower boxplot fence: ", round(lo_fence, 1), " L/s")
-    message("[QA] Excluded as plant shutdowns (n=", nrow(out_rows), "):")
+    message("[QA] Observations below the fence (n=", nrow(out_rows),
+            "), likely plant shutdowns \u2014 reported and RETAINED:")
     print(out_rows)
-    df2 <- df2[caudal >= lo_fence]
+    if (isTRUE(getOption("qwd.drop_outliers", FALSE))) {
+      df2 <- df2[caudal >= lo_fence]
+      message("[QA] Excluded from the analytical dataset (cfg$drop_outliers = TRUE)")
+    }
   }
   assign("qa_outliers", out_rows, envir = globalenv())
   
@@ -1075,6 +1079,8 @@ stopifnot(file.exists(cfg$p_bella))
 stopifnot(file.exists(cfg$p_inq))
 stopifnot(file.exists(cfg$oni))
 
+options(qwd.drop_outliers = isTRUE(cfg$drop_outliers))
+
 dem <- read_demanda(cfg$demanda)
 P_bella <- read_hidro_2cols(cfg$p_bella, "precip_bellavista")
 P_inq   <- read_hidro_2cols(cfg$p_inq,   "precip_inaquito")
@@ -1116,11 +1122,21 @@ fwrite(tab_glm, file.path(cfg$results_dir, "Table_Performance_GLM_Gamma.csv"), b
 # matches the caption "Comparative performance of the regression-based model
 # specifications" rather than being split across two files.
 tab4_reg <- rbindlist(list(
-  copy(tab_ols)[, Family := "OLS"],
-  copy(tab_glm)[, Family := "GLM Gamma (log link)"]
+  copy(tab_glm)[, Model := paste0(Model, " (GLM Gamma)")],
+  copy(tab_ols)[, Model := paste0(Model, " (OLS)")]
 ), fill = TRUE)
-setcolorder(tab4_reg, c("Family", setdiff(names(tab4_reg), "Family")))
-setorder(tab4_reg, Family, RMSE)
+
+# Same columns, order and rounding as published in the manuscript.
+keep4 <- intersect(c("Model", "AIC", "BIC", "RMSE", "MAE", "MAPE (%)",
+                     "Bias", "R² (test)", "r"), names(tab4_reg))
+tab4_reg <- tab4_reg[, ..keep4]
+setorder(tab4_reg, RMSE)
+for (cc in intersect(c("AIC", "BIC", "RMSE", "MAE"), names(tab4_reg)))
+  tab4_reg[, (cc) := round(get(cc), 0)]
+for (cc in intersect(c("MAPE (%)", "Bias"), names(tab4_reg)))
+  tab4_reg[, (cc) := round(get(cc), 2)]
+for (cc in intersect(c("R² (test)", "r"), names(tab4_reg)))
+  tab4_reg[, (cc) := round(get(cc), 3)]
 fwrite(tab4_reg, file.path(cfg$tab_dir, "Table4_RegressionSpecifications.csv"), bom = TRUE)
 
 writeLines(paste0(
@@ -2272,8 +2288,11 @@ k_note <- paste0(
   "computed on observed demand over ", nrow(DTK_clean), " daily records (",
   format(min(DTK_clean$fecha), "%Y"), "-", format(max(DTK_clean$fecha), "%Y"), "). ",
   if (nrow(out_rows) > 0) paste0(nrow(out_rows),
-    " observations below the lower boxplot fence (", round(lo_fence, 0),
-    " L/s), attributable to plant shutdowns rather than demand, were excluded. ") else "",
+    " observations fall below the lower boxplot fence (", round(lo_fence, 0),
+    " L/s) and are attributable to treatment-plant shutdowns rather than to ",
+    "demand; they are ",
+    if (isTRUE(k_cfg$drop_outliers)) "excluded from this calculation. "
+    else "reported here and retained, so that K is computed on the complete operational record. ") else "",
   "Estimating K from modelled conditional means rather than from observed demand ",
   "omits residual variability and understates the coefficient (", round(mean(K_mu$K_peak), 3),
   " versus ", round(K_obs_summary$mean, 3), ")."
