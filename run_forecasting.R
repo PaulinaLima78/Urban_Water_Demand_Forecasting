@@ -2380,7 +2380,11 @@ supp_map <- c(
   "Table_SerialDependence_Inference.csv"            = "TableS3_ModelCoefficients_RobustSE.csv",
   "Table_SerialDependence_Notes.txt"                = "TableS3_Notes.txt",
   "Table_Forecast_Annual_MixedScenarios.csv"        = "TableS4_ProjectedDemand_Scenarios.csv",
-  "Table5_RollingOriginCV_FULL.csv"                 = "TableS5_RollingOriginCV_ByOrigin.csv",
+  # S5 must add information to Table 5, not repeat it: the long file holds
+  # one row per forecast origin, horizon and model. The FULL file is the
+  # same aggregate as Table 5 with two diagnostic columns and is kept in
+  # results/ only.
+  "Table5_RollingOriginCV_long.csv"                 = "TableS5_RollingOriginCV_ByOrigin.csv",
   "Table_PeakFactor_K_methods.csv"                  = "TableS6_PeakFactor_Methods.csv",
   "Table_HAC_Bandwidth_Sensitivity.csv"             = "TableS7_HAC_BandwidthSensitivity.csv",
   "Table_ResidualACF.csv"                           = "TableS8_ResidualACF.csv",
