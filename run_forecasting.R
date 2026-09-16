@@ -2375,21 +2375,14 @@ fig_map <- c(
 # Numbering follows the order of first citation in the manuscript:
 #   S3 full coefficients, S4 scenario projections, S5 rolling-origin detail.
 supp_map <- c(
-  "Table_DieboldMariano_Results.csv"                = "TableS1_DieboldMariano.csv",
-  "Table_HydrosocialBlockContributions_MPO_OLS.csv" = "TableS2_BlockContributions.csv",
-  "Table_SerialDependence_Inference.csv"            = "TableS3_ModelCoefficients_RobustSE.csv",
-  "Table_SerialDependence_Notes.txt"                = "TableS3_Notes.txt",
-  "Table_Forecast_Annual_MixedScenarios.csv"        = "TableS4_ProjectedDemand_Scenarios.csv",
-  # S5 must add information to Table 5, not repeat it: the long file holds
-  # one row per forecast origin, horizon and model. The FULL file is the
-  # same aggregate as Table 5 with two diagnostic columns and is kept in
-  # results/ only.
-  "Table5_RollingOriginCV_long.csv"                 = "TableS5_RollingOriginCV_ByOrigin.csv",
-  "Table_PeakFactor_K_methods.csv"                  = "TableS6_PeakFactor_Methods.csv",
-  "Table_HAC_Bandwidth_Sensitivity.csv"             = "TableS7_HAC_BandwidthSensitivity.csv",
-  "Table_ResidualACF.csv"                           = "TableS8_ResidualACF.csv",
-  "Table_PeakFactor_K_byYear.csv"                   = "TableS9_PeakFactorK_ByYear.csv",
-  "Table_PeakFactor_K_Notes.txt"                    = "TableS9_Notes.txt"
+  # Only the supplementary tables cited in the manuscript are exported,
+  # numbered in order of first citation. The remaining result files stay
+  # in results/ as reproducible output but are not part of the submission.
+  "Table_DieboldMariano_Results.csv"       = "TableS1_DieboldMariano.csv",
+  "Table_SerialDependence_Inference.csv"   = "TableS2_ModelCoefficients_RobustSE.csv",
+  "Table_SerialDependence_Notes.txt"       = "TableS2_Notes.txt",
+  "Table_Forecast_Annual_MixedScenarios.csv" = "TableS3_ProjectedDemand_Scenarios.csv",
+  "Table5_RollingOriginCV_long.csv"        = "TableS4_RollingOriginCV_ByOrigin.csv"
 )
 
 copy_set <- function(src_dir, mapping, dest, label) {
@@ -2435,7 +2428,7 @@ copy_set(
   cfg$results_dir,
   supp_map,
   sub_supp,
-  "supplementary tables S1-S9"
+  "supplementary tables S1-S4"
 )
 
 # ------------------------------------------------------------
@@ -2488,7 +2481,7 @@ writeLines(c(
   "",
   "figures/        Fig3-Fig8 generated here; Fig1-Fig2 placed manually",
   "tables/         Table3-Table5 generated here; Table1-Table2 placed manually",
-  "supplementary/  Supplementary Tables S1-S9",
+  "supplementary/  Supplementary Tables S1-S4",
   "",
   "PLACED MANUALLY (not produced by this code):",
   "  Fig1_StudyArea.png              study-area map",
@@ -2507,14 +2500,9 @@ writeLines(c(
   "  Table 4   comparative performance of regression specifications",
   "  Table 5   predictive accuracy by forecast horizon",
   "  Table S1  Diebold-Mariano tests",
-  "  Table S2  block contributions to explained variance",
-  "  Table S3  model coefficients with robust standard errors",
-  "  Table S4  projected demand by scenario",
-  "  Table S5  rolling-origin cross-validation by origin",
-  "  Table S6  peak factor estimated by three methods",
-  "  Table S7  HAC bandwidth sensitivity",
-  "  Table S8  residual autocorrelation function",
-  "  Table S9  annual peak-demand coefficient K",
+  "  Table S2  model coefficients with robust standard errors",
+  "  Table S3  projected demand by scenario",
+  "  Table S4  rolling-origin cross-validation by origin",
   "",
   "Session information:",
   capture.output(sessionInfo())
